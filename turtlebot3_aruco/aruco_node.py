@@ -1,4 +1,8 @@
-"""ArUco 4개 마커 인식 노드 (RPi에서 실행, OpenCV 4.5 / 4.7+ 모두 지원)
+"""ArUco 4개 마커 인식 노드 (OpenCV 4.5 / 4.7+ 모두 지원)
+
+권장: Orin에서 실행하고, RPi의 Pi 카메라 압축 영상(/camera/image_raw/compressed)을 받는다.
+      (RPi는 베이스 주행 · 라이다를 담당하므로 영상 처리 부하를 Orin으로 옮김)
+RPi에서 직접 돌릴 때는 USE_COMPRESSED = False 로 raw 영상을 받으면 된다.
 
   python3 aruco_node.py
   -> /aruco/<name>_pose   마커 중심 '표면' 위치·방향 (PoseStamped, 카메라 광학 프레임)
@@ -16,8 +20,9 @@ import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from scipy.spatial.transform import Rotation as R
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 
 # ---- 여기만 수정 -------------------------------------------------------
 MARKERS = {
@@ -28,7 +33,8 @@ MARKERS = {
 }
 OFFSET = {}          # 실측 보정값 (m, 카메라 광학 프레임) 예: {0: (0.0, 0.0, 0.004)}
 AVG_N = 5            # 이동 평균 프레임 수
-IMAGE_TOPIC = "/camera/image_raw"
+USE_COMPRESSED = True                 # Orin: True (압축 영상) / RPi에서 실행: False
+IMAGE_TOPIC = "/camera/image_raw"     # 압축 사용 시 자동으로 '/compressed' 를 붙여 구독
 INFO_TOPIC = "/camera/camera_info"
 # ----------------------------------------------------------------------
 
@@ -70,8 +76,20 @@ class ArucoNode(Node):
         self.pub_center = {i: self.create_publisher(PoseStamped, f"/aruco/{c['name']}_center", 10)
                            for i, c in MARKERS.items() if c.get("cyl_radius")}
         self.create_subscription(CameraInfo, INFO_TOPIC, self.info_cb, 10)
-        self.create_subscription(Image, IMAGE_TOPIC, self.img_cb, 10)
-        self.get_logger().info(f"markers: { {i: c['name'] for i, c in MARKERS.items()} }")
+        # sensor_data QoS(best effort, depth 1): 처리가 밀려도 오래된 프레임이 쌓이지 않음
+        if USE_COMPRESSED:
+            self.create_subscription(CompressedImage, IMAGE_TOPIC + "/compressed",
+                                     self.img_cb, qos_profile_sensor_data)
+        else:
+            self.create_subscription(Image, IMAGE_TOPIC, self.img_cb, qos_profile_sensor_data)
+        self.get_logger().info(f"markers: { {i: c['name'] for i, c in MARKERS.items()} }, "
+                               f"compressed={USE_COMPRESSED}")
+
+    def to_gray(self, msg):
+        if USE_COMPRESSED:
+            buf = np.frombuffer(msg.data, dtype=np.uint8)
+            return cv2.imdecode(buf, cv2.IMREAD_GRAYSCALE)
+        return cv2.cvtColor(self.bridge.imgmsg_to_cv2(msg, "bgr8"), cv2.COLOR_BGR2GRAY)
 
     def info_cb(self, m):
         self.K = np.array(m.k, dtype=np.float64).reshape(3, 3)
@@ -80,7 +98,9 @@ class ArucoNode(Node):
     def img_cb(self, msg):
         if self.K is None:
             return
-        gray = cv2.cvtColor(self.bridge.imgmsg_to_cv2(msg, "bgr8"), cv2.COLOR_BGR2GRAY)
+        gray = self.to_gray(msg)
+        if gray is None:
+            return
         corners, ids, _ = self.detect(gray)
         seen = set()
         if ids is not None:

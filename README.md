@@ -19,21 +19,22 @@ TurtleBot3 Waffle Pi + OpenMANIPULATOR-X로 복도에서 쓰레기(콜라캔)를
 |---|---|
 | 플랫폼 | TurtleBot3 Waffle Pi |
 | 매니퓰레이터 | OpenMANIPULATOR-X (4축) |
-| 메인 컴퓨터 | Jetson Orin Nano (JetPack 6.2.1) — bringup · Nav2 · MoveIt · YOLO |
-| 보조 컴퓨터 | Raspberry Pi 4 — Pi 카메라 · ArUco 인식 |
-| 카메라 | Intel RealSense D435i (YOLO · 뎁스), Raspberry Pi Camera v2.1 (ArUco) |
+| 메인 컴퓨터 | Jetson Orin Nano (JetPack 6.2.1) — 팔 · MoveIt · YOLO · ArUco · Nav2 · 작업 로직 |
+| 보조 컴퓨터 | Raspberry Pi 4 — 베이스 주행(OpenCR) · LDS-03 라이다 · Pi 카메라 영상 |
+| 카메라 | Intel RealSense D435i (OMX 팔 장착, YOLO · 뎁스), Raspberry Pi Camera v2.1 (몸체 고정, ArUco) |
+| 통신 | 라파4 ↔ Orin 유선 직결 (Cyclone DDS), 외부망은 핫스팟 |
 
 집는 순간 D435i 시야가 그리퍼와 물체에 가려지기 때문에, 마커 인식은 Pi 카메라로 따로 합니다.
 
 ## 구조
 
 ```
-turtlebot3_aruco/    Pi 카메라 ArUco 마커 인식 (쓰레기통 1 · 벽 3), 인쇄용 마커, 설정 가이드
+turtlebot3_aruco/    Pi 카메라 ArUco 마커 인식 (쓰레기통 1 · 벽 3), 쓰레기통 앞 정렬, 인쇄용 마커
 ```
 
 | 폴더 | 내용 | 상태 |
 |---|---|---|
-| [`turtlebot3_aruco`](turtlebot3_aruco/README.md) | 마커 인식 노드, 원통 곡면 보정, 인쇄물, 네트워크 · 캘리브레이션 가이드 | 코드 작성 · 실기 테스트 전 |
+| [`turtlebot3_aruco`](turtlebot3_aruco/README.md) | 마커 인식 노드(원통 곡면 보정), 쓰레기통 정렬 노드, 인쇄물 | 코드 작성 · 시뮬레이션 검증, 실기 테스트 전 |
 
 ## 진행 상황
 
@@ -41,7 +42,9 @@ turtlebot3_aruco/    Pi 카메라 ArUco 마커 인식 (쓰레기통 1 · 벽 3),
 - [x] YOLO26n TensorRT FP16 변환 (추론 37.8 ms → 10.9 ms)
 - [x] MoveIt 집기 시뮬레이션 (4개 시나리오 검증)
 - [x] ArUco 마커 인식 노드 · 인쇄물
+- [x] 쓰레기통 정렬 노드 (시뮬레이션 45/45 수렴)
 - [ ] Pi 카메라 캘리브레이션 · 실기 마커 인식 확인
-- [ ] 쓰레기통 정렬 · 놓기 노드
+- [ ] 두 보드 연동 (유선 · Cyclone DDS) · 팔 단독 구동
+- [ ] 쓰레기통 정렬 실기 테스트 · 놓기 노드
 - [ ] 전체 시나리오 상위 노드 (Nav2 → 집기 → 이동 → 버리기)
 - [ ] 복도 리허설
