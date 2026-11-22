@@ -11,6 +11,9 @@ Nav2로 쓰레기통 지점에 도착한 뒤, 몸체에 고정된 Pi 카메라�
   APPROACH : 마커 법선 위의 직선을 따라 목표 거리까지 전진/후진하며 좌우 오차를 줄임
   BACKOFF  : 목표 거리에 왔는데 좌우 오차가 남았으면 backoff 만큼 후진하며 좌우 보정 → 다시 APPROACH
   ROTATE   : 위치가 맞으면 제자리 회전으로 정면 각도 맞춤 → 오차 유지되면 완료
+  ADVANCE  : (advance > 0 일 때) 정렬 후 오도메트리로 advance 만큼 직진.
+             팔이 통 중심에 닿으려면 카메라가 마커를 잘 보는 거리(standoff)보다 더 다가가야 할 때 사용.
+             이 구간은 마커가 너무 가까워 안 보여도 된다 (arm_server 가 통 위치를 odom 기준으로 기억).
 
 주의
 - Nav2 목표가 끝난 뒤에만 호출할 것 (Nav2와 /cmd_vel 충돌)
@@ -24,6 +27,7 @@ import time
 
 import rclpy
 from geometry_msgs.msg import PoseStamped, Twist
+from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
@@ -72,6 +76,8 @@ class BinAligner(Node):
         self.stale = p("stale", 0.3)               # 이 시간 넘게 마커 없으면 일시 정지 (s)
         self.lost_timeout = p("lost_timeout", 2.0) # 이 시간 넘게 마커 없으면 실패 (s)
         self.total_timeout = p("total_timeout", 40.0)
+        self.advance = p("advance", 0.0)            # 정렬 후 오도메트리 직진 거리 (m), 0이면 생략
+        self.advance_v = p("advance_v", 0.03)       # 직진 속도 (m/s)
         auto_start = p("auto_start", False)
 
         self.tf = Buffer()
@@ -80,6 +86,8 @@ class BinAligner(Node):
         cb = ReentrantCallbackGroup()
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.create_subscription(PoseStamped, self.pose_topic, self.pose_cb, 10, callback_group=cb)
+        self.create_subscription(Odometry, "/odom", self.odom_cb, 10, callback_group=cb)
+        self.odom = None            # (x, y, yaw)
         self.create_timer(0.05, self.control_step, callback_group=cb)  # 20 Hz
         self.create_service(Trigger, "/bin_aligner/align", self.align_srv,
                             callback_group=MutuallyExclusiveCallbackGroup())
@@ -109,6 +117,12 @@ class BinAligner(Node):
         with self.lock:
             self.marker = (pb.pose.position.x, pb.pose.position.y, nx / norm, ny / norm,
                            time.monotonic())
+
+    def odom_cb(self, msg):
+        q = msg.pose.pose.orientation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        with self.lock:
+            self.odom = (msg.pose.pose.position.x, msg.pose.pose.position.y, yaw)
 
     # ---------------------------------------------------------------- 서비스
     def start(self):
@@ -151,6 +165,8 @@ class BinAligner(Node):
         now = time.monotonic()
         if now - self.t_start > self.total_timeout:
             return self.finish(False, "시간 초과")
+        if self.phase == "ADVANCE":
+            return self.advance_step()
 
         with self.lock:
             m = self.marker
@@ -190,8 +206,17 @@ class BinAligner(Node):
                 self.cmd_pub.publish(cmd)
                 self.t_good = self.t_good or now
                 if now - self.t_good >= self.hold_time:
-                    self.finish(True, f"정렬 완료 (앞뒤 {xr * 1000:.0f} mm, 좌우 {yr * 1000:.0f} mm, "
+                    self.align_msg = (f"정렬 완료 (앞뒤 {xr * 1000:.0f} mm, 좌우 {yr * 1000:.0f} mm, "
                                       f"각도 {math.degrees(psi):.1f} deg)")
+                    if self.advance <= 0:
+                        return self.finish(True, self.align_msg)
+                    with self.lock:
+                        o = self.odom
+                    if o is None:
+                        return self.finish(False, "/odom 이 없어 직진(advance)을 할 수 없음")
+                    self.adv_start = o
+                    self.adv_t0 = now
+                    self.set_phase("ADVANCE")
                 return
             self.t_good = None
             w = -self.k_yaw * psi
@@ -211,6 +236,22 @@ class BinAligner(Node):
             psi_des = -sign * clip(math.atan(self.k_lat * yr), self.psi_max)
             cmd.linear.x = v
             cmd.angular.z = clip(self.k_psi * wrap(psi_des - psi), self.max_w)
+        self.cmd_pub.publish(cmd)
+
+    def advance_step(self):
+        """정렬된 방향을 유지하며 오도메트리로 advance 만큼 직진."""
+        with self.lock:
+            o = self.odom
+        x0, y0, yaw0 = self.adv_start
+        dist = math.hypot(o[0] - x0, o[1] - y0)
+        remain = self.advance - dist
+        if remain <= 0.002:
+            return self.finish(True, f"{self.align_msg} → {dist * 1000:.0f} mm 직진")
+        if time.monotonic() - self.adv_t0 > 3 * self.advance / self.advance_v + 3.0:
+            return self.finish(False, f"직진 시간 초과 ({dist * 1000:.0f} mm 진행)")
+        cmd = Twist()
+        cmd.linear.x = max(self.min_v, min(self.advance_v, self.k_x * remain))
+        cmd.angular.z = clip(-self.k_yaw * wrap(o[2] - yaw0), self.max_w)
         self.cmd_pub.publish(cmd)
 
 

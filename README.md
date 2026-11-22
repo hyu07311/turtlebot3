@@ -30,11 +30,13 @@ TurtleBot3 Waffle Pi + OpenMANIPULATOR-X로 복도에서 쓰레기(콜라캔)를
 
 ```
 turtlebot3_aruco/    Pi 카메라 ArUco 마커 인식 (쓰레기통 1 · 벽 3), 쓰레기통 앞 정렬, 인쇄용 마커
+turtlebot3_mission/  시연 시나리오 상위 노드, 팔 서비스(관측 · 접기 · 집기 · 놓기), OMX IK
 ```
 
 | 폴더 | 내용 | 상태 |
 |---|---|---|
-| [`turtlebot3_aruco`](turtlebot3_aruco/README.md) | 마커 인식 노드(원통 곡면 보정), 쓰레기통 정렬 노드, 인쇄물 | 코드 작성 · 시뮬레이션 검증, 실기 테스트 전 |
+| [`turtlebot3_aruco`](turtlebot3_aruco/README.md) | 마커 인식 노드(원통 곡면 보정), 쓰레기통 정렬 노드(+직진), 인쇄물 | 코드 작성 · 시뮬레이션 검증, 실기 테스트 전 |
+| [`turtlebot3_mission`](turtlebot3_mission/README.md) | `mission_node` (11단계 · 재시도 · 안전 정지), `arm_server` (MoveIt · 그리퍼 · grasp_node 연동), OMX IK | 코드 작성 · 로직 검증, 실기 테스트 전 |
 
 ## 진행 상황
 
@@ -46,5 +48,6 @@ turtlebot3_aruco/    Pi 카메라 ArUco 마커 인식 (쓰레기통 1 · 벽 3),
 - [ ] Pi 카메라 캘리브레이션 · 실기 마커 인식 확인
 - [ ] 두 보드 연동 (유선 · Cyclone DDS) · 팔 단독 구동
 - [ ] 쓰레기통 정렬 실기 테스트 · 놓기 노드
-- [ ] 전체 시나리오 상위 노드 (Nav2 → 집기 → 이동 → 버리기)
+- [x] 전체 시나리오 상위 노드 · 팔 서비스 코드 (로직 검증)
+- [ ] 팔 자세 · 그리퍼 값 실측, grasp_node 결과 토픽 연동
 - [ ] 복도 리허설

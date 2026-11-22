@@ -155,7 +155,7 @@ ros2 topic hz /aruco/bin_pose          # 10 Hz 이상
 ros2 topic echo /aruco/wall_1_pose     # 30 cm 앞에 두면 position.z ≈ 0.30
 
 # Orin: 쓰레기통 정렬 (Nav2 도착 후)
-python3 bin_aligner.py
+python3 bin_aligner.py --ros-args -p advance:=0.12   # 직진 거리는 팔 마운트에 맞게
 ros2 service call /bin_aligner/align std_srvs/srv/Trigger
 ```
 라파에서 직접 인식하려면 `aruco_node.py` 의 `USE_COMPRESSED = False`.
@@ -213,10 +213,10 @@ ArUco는 마커가 평평하다고 가정한다. 원통에 감긴 마커는:
 ## 8. `bin_aligner.py` — 쓰레기통 앞 정렬
 
 Nav2 도착 오차(약 5 cm, 수 도)를 Pi 카메라로 본 쓰레기통 마커 기준으로 줄인다.
-와플파이는 옆으로 못 움직이므로 **주차하듯 3단계**로 맞춘다.
+와플파이는 옆으로 못 움직이므로 **주차하듯 3단계**로 맞추고, 필요하면 마지막에 직진한다.
 
 ```
-APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE ── 오차 0.5 s 유지 ──▶ 완료
+APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE ── 오차 0.5 s 유지 ──▶ (ADVANCE) ──▶ 완료
    ▲                        └── 좌우 남음 ─▶ BACKOFF (15 cm 후진하며 좌우 보정)
    └──────────────────────────────────────────┘          (최대 3회)
 ```
@@ -226,6 +226,7 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
 | APPROACH | 마커 법선 위 직선을 따라 목표 거리(`standoff`)까지 전진/후진. 좌우 오차에 비례해 최대 15° 기울여 직선으로 복귀 |
 | BACKOFF | 목표 거리에 왔는데 좌우 오차가 남으면 `backoff` 만큼 후진하며 보정 |
 | ROTATE | 제자리 회전으로 정면 각도 맞춤 → 허용 오차 이내 0.5 s 유지되면 정지 |
+| ADVANCE | (`advance` > 0) 정렬한 방향을 유지하며 `/odom` 으로 `advance` 만큼 직진. 마커가 너무 가까워 안 보여도 됨 |
 | 안전 | 마커 0.3 s 안 보이면 정지, 2 s 안 보이면 실패. 전체 40 s 초과 시 실패. 종료 시 항상 정지 명령 |
 
 - 호출: `/bin_aligner/align` (`std_srvs/Trigger`) — 정렬이 끝날 때까지 블록하고 성공/실패와 최종 오차를 반환
@@ -234,7 +235,8 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
 ### 주요 파라미터
 | 이름 | 기본값 | 의미 |
 |---|---|---|
-| `standoff` | 0.25 m | base_link 원점 ~ 통 표면 목표 거리. **OMX가 통 중심 위에 닿도록 실측해서 조정** |
+| `standoff` | 0.25 m | base_link 원점 ~ 통 표면 정렬 거리. Pi 카메라가 마커를 잘 보는 거리 |
+| `advance` | 0.0 m | 정렬 후 직진 거리. **표준 팔 마운트면 0.12 m** (팔이 통 중심 위에 닿으려면 통 표면이 base_link에서 0.153 m 이내 — [`../turtlebot3_mission/README.md`](../turtlebot3_mission/README.md) 4장) |
 | `pos_tol` / `lat_tol` | 15 mm | 앞뒤 / 좌우 허용 오차 (통 지름 19 cm 기준 충분한 여유) |
 | `yaw_tol_deg` | 3° | 각도 허용 오차 |
 | `max_v` / `max_w` | 0.05 m/s / 0.3 rad/s | 최대 속도 |
@@ -250,6 +252,7 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
 | 없음 | 45/45 | 9.6 s / 18.1 s | 5.3 mm | 2.9° |
 | 2 mm · 0.2° | 45/45 | 9.3 s / 18.1 s | 10.7 mm | 2.8° |
 | 4 mm · 0.4° | 45/45 | 9.1 s / 17.9 s | 10.9 mm | 2.7° |
+| 4 mm · 0.4°, **advance 0.10 m**, 오도메트리 1% 오차, 0.17 m 이내 마커 안 보임 | 45/45 | – / 22.4 s | 앞뒤 12.1 mm · 좌우 15.0 mm | 2.7° |
 
 > 개발 중 확인한 문제: 처음 쓴 극좌표 제어(Siegwart)는 **좌우로만 어긋난 경우** 앞뒤로 진동하며
 > 45개 중 20개 실패 → 3단계 방식으로 변경. 또 완료 판정을 접근 중에도 하면 허용 오차 경계(≈13 mm)에서
@@ -273,8 +276,8 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
 | 2 | Pi 카메라 TF 확인 → `aruco_node` 실측 보정 | 5.4, 7 |
 | 3 | 쓰레기통 정렬 실기 테스트: 일부러 5 cm · 10° 어긋나게 세우고 `auto_start` | 8 |
 | 4 | 팔 · D435i TF 통합 (팀 가이드 9장) | 아래 |
-| 5 | 놓기 동작: `/aruco/bin_center` → `link1` 변환 → 통 위로 팔 이동 → 그리퍼 열기 | TODO |
-| 6 | `mission_node`: Nav2 → 집기 → Nav2 → 정렬 → 놓기 | TODO |
+| 5 | 놓기 동작 (`arm_server.py` 의 `/drop/place`) 실기 확인 | [`../turtlebot3_mission`](../turtlebot3_mission/README.md) |
+| 6 | `mission_node.py` 단계별 리허설 → 전체 | [`../turtlebot3_mission`](../turtlebot3_mission/README.md) |
 | 7 | (필요 시) `wall_localizer`: 벽 마커로 AMCL 위치 보정 | TODO |
 
 ### 4단계 메모: D435i가 팔에 달려 있을 때
@@ -285,17 +288,13 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
   (D435i는 약 0.2~0.3 m보다 가까우면 뎁스가 안 나오므로 접근 중에는 다시 보지 않는다)
 - 카메라 장착 위치는 자로 실측하거나, 마커를 이용한 hand-eye 캘리브레이션으로 구한다
 
+### 놓기 · 시나리오 노드
+[`../turtlebot3_mission/`](../turtlebot3_mission/README.md) 에 작성 (`mission_node.py`, `arm_server.py`, `omx_ik.py`). 요점:
+- 놓는 높이는 **그리퍼 중심 바닥 기준 0.30 m** (통 입구 20 cm + 옆으로 잡은 캔 절반 6 cm + 여유) — `bin_center` 의 z는 쓰지 않음
+- 통 위로 갈 때 5 cm 더 띄운 경유점, MoveIt 장면에 쓰레기통 원통 추가
+- 통 위치는 `odom` 기준으로 기억 → 정렬 후 직진(advance)으로 마커가 안 보여도 놓을 수 있음
+
 ### TODO 노드
-- **놓기**: `/aruco/bin_center` 를 `link1` 로 변환 → 통 입구(높이 20 cm) + 5 cm, 즉 **바닥에서 약 25 cm** 위 목표
-  → 기존 `grasp_node`의 해석적 IK + MoveIt 재사용 → 그리퍼 열기 → 접기
-  (남은 정보: base_link 기준 팔 마운트 위치 → `standoff` 결정)
-  - 마커 중심 높이 ≠ 통 입구 높이이므로, 놓기 목표 z는 `bin_center` 의 z를 쓰지 말고 바닥 기준 25 cm로 고정
-  - 그리퍼에 캔을 든 채 통 위로 갈 때 캔 아래 끝이 통 테두리에 걸리지 않게 경유점(위로 들고 → 앞으로)을 둔다
-- **mission_node**: `nav2_simple_commander.BasicNavigator.goToPose()` → `/bin_aligner/align` → 놓기 서비스 순서로 호출, 단계별 타임아웃 · 재시도
-  ```
-  START → GO_TRASH(Nav2) → GRASP(관측 자세 → YOLO → grasp_node)
-        → GO_BIN(Nav2) → ALIGN_BIN(bin_aligner) → DROP → DONE
-  ```
 - **wall_localizer**: 벽 마커 지도 좌표 `WALL_MAP = {1: (x, y, yaw), ...}` 기록 →
   `T_map_base = T_map_marker × inv(T_base_marker)` → `/initialpose` 발행 (정지 상태, 1.5 m 이내, 쿨다운)
 
