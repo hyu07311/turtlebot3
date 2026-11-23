@@ -1,0 +1,22 @@
+# Pi Camera v2.1 (IMX219), 640x480, sensor_mode 1640:1232 (전체 화각). 2026-11-23
+# fx 는 50 cm 정면 체커보드(7x10 내부코너, 25 mm)로 실측 고정, 주점은 영상 중심 고정, 왜곡 k1,k2 는 보정 사진 49장으로 계산
+image_width: 640
+image_height: 480
+camera_name: imx219__base_soc_i2c0mux_i2c_1_imx219_10_640x480
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [525.000000, 0.000000, 320.000000, 0.000000, 525.000000, 240.000000, 0.000000, 0.000000, 1.000000]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.212819, -0.388618, 0.000000, 0.000000, 0.000000]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [525.000000, 0.000000, 320.000000, 0.000000, 0.000000, 525.000000, 240.000000, 0.000000, 0.000000, 0.000000, 1.000000, 0.000000]

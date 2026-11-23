@@ -6,30 +6,30 @@ TurtleBot3 Waffle Pi + OpenMANIPULATOR-X(RM-X52-TNM) 쓰레기 수거 시연에�
 - **시나리오**: 출발 → Nav2 이동 → 쓰레기 줍기(D435i + YOLO) → Nav2 이동 → **쓰레기통 마커로 정렬** → 버리기
 - **카메라 역할**
   - D435i: **OMX 팔에 장착** (eye-in-hand) → YOLO 인식 · 뎁스. 집는 순간 시야가 가려짐
-  - Pi 카메라: **로봇 몸체에 고정** → ArUco 마커 인식 (쓰레기통 · 벽)
-- 보드 구성 · 네트워크 · 팔 구동은 팀 통합 세팅 가이드(`터틀봇3 + OpenMANIPULATOR-X + Orin Nano 통합 세팅 가이드`)를 따른다.
-  이 문서는 그 위에서 ArUco 관련 부분만 다룬다.
+  - Pi 카메라: **로봇 몸체에 고정** → ArUco 마커 인식 (쓰레기통 · 주요 포인트 · 캔 거치대)
+- 보드 구성·역할은 [저장소 README](../README.md) 기준. 라즈베리파이는 **Pi 카메라 + ArUco 인식만** 담당하고,
+  OpenCR(바퀴·팔)·LDS-03·D435i는 모두 Orin에 연결된다. 이 문서는 ArUco 관련 부분만 다룬다.
 
 ---
 
-## 1. 시스템 구성 (팀 가이드 기준)
+## 1. 시스템 구성
 
 ```
 [스마트폰 핫스팟] -- Wi-Fi -- 라파4, Orin Nano, (내 PC)   : 인터넷, SSH
 라파4 (192.168.10.1) == 유선랜 직결 == Orin Nano (192.168.10.2) : ROS 2 통신 전용 (Cyclone DDS)
 
-[라파4]                                         [Orin Nano]
- turtlebot3_bringup (OpenCR, LDS-03, odom)       팔 (U2D2, ros2_control, MoveIt)
- camera_ros: Pi 카메라 ─ /camera/image_raw/compressed ─▶ aruco_node.py ─▶ /aruco/*
-                ◀──────────────── /cmd_vel ──────────── bin_aligner.py
-                                                 D435i (팔 장착) + YOLO, Nav2, 작업 로직
+[라파4]                                          [Orin Nano]
+ camera_ros: Pi 카메라                            OpenCR(USB): 바퀴 · 팔 (turtlebot3_manipulation, /odom, /cmd_vel)
+   └▶ aruco_node.py ─── /aruco/* ──────────────▶  bin_aligner.py / stand_aligner.py ── /cmd_vel ──▶ 바퀴
+                                                  LDS-03(USB): SLAM · Nav2
+                                                  D435i(팔 손목) + YOLO, MoveIt, 시나리오
 ```
 
 | 항목 | 내용 |
 |---|---|
 | ROS | ROS 2 Humble, `ROS_DOMAIN_ID=30`, `rmw_cyclonedds_cpp` (유선 인터페이스 고정) |
 | Pi 카메라 | Raspberry Pi Camera v2.1 (IMX219), 640×480, 라파4에서 발행 |
-| ArUco 처리 | **Orin** (라파는 주행 · 라이다 담당이라 부하를 Orin으로) |
+| ArUco 처리 | **라파** (라파의 역할은 Pi 카메라 + ArUco 인식뿐. 결과 `/aruco/*` 만 Orin으로 보냄) |
 | 마커 사전 | `DICT_4X4_50` |
 
 ---
@@ -38,12 +38,18 @@ TurtleBot3 Waffle Pi + OpenMANIPULATOR-X(RM-X52-TNM) 쓰레기 수거 시연에�
 
 ```
 .
-├── aruco_node.py        # 마커 인식 (Orin, Pi 카메라 압축 영상 구독)
+├── aruco_node.py        # 마커 인식 (라파, Pi 카메라 영상 직접 구독 USE_COMPRESSED=False)
 ├── bin_aligner.py       # 쓰레기통 앞 미세 정렬 (Orin, /cmd_vel)
+├── stand_aligner.py     # 캔 거치대(ID 3) 앞 정렬 (Orin, bin_aligner 알고리즘 재사용)
+├── aruco_explore.py     # SLAM 자율 탐색: frontier → Nav2, 지도 완성 시 자동 저장 · 종료, 마커 = 맵의 끝 (Orin)
+├── frontier.py          # 지도에서 탐색 경계(frontier) · 마커 뒤쪽 제외 · 관측 지점 계산
+├── marker_mapper.py     # SLAM 맵핑 중 마커 지도 좌표 기록 + waypoints.yaml 자동 생성 (Orin)
+├── aruco_localizer.py   # Nav2 주행 중 마커로 AMCL 위치 보정 (/initialpose, Orin)
+├── marker_geom.py       # 위 두 노드의 좌표 계산 (순수 함수)
 ├── make_markers.py      # 인쇄용 마커 PDF 생성
 └── markers/
     ├── aruco_markers_60mm.pdf   # ID 0 (쓰레기통)       ← 인쇄
-    ├── aruco_markers_80mm.pdf   # ID 1, 2, 3 (벽)       ← 인쇄
+    ├── aruco_markers_80mm.pdf   # ID 1, 2 (주요 포인트), 3 (캔 거치대) ← 인쇄
     └── *.png                    # 미리보기
 ```
 
@@ -54,9 +60,9 @@ TurtleBot3 Waffle Pi + OpenMANIPULATOR-X(RM-X52-TNM) 쓰레기 수거 시연에�
 | ID | 부착 위치 | 크기 | 비고 | 발행 토픽 |
 |---|---|---|---|---|
 | 0 | 원형 쓰레기통 (지름 19 cm, 높이 20 cm) | 60 mm | 원통 곡면 보정 | `/aruco/bin_pose`, `/aruco/bin_center` |
-| 1 | 벽 | 80 mm | 평면 | `/aruco/wall_1_pose` |
-| 2 | 벽 | 80 mm | 평면 | `/aruco/wall_2_pose` |
-| 3 | 벽 | 80 mm | 평면 | `/aruco/wall_3_pose` |
+| 1 | 주요 포인트 | 80 mm | 평면, 이동 중 위치 보정 | `/aruco/wall_1_pose` |
+| 2 | 주요 포인트 | 80 mm | 평면, 이동 중 위치 보정 | `/aruco/wall_2_pose` |
+| 3 | 콜라캔 거치대 | 80 mm | 평면, 거치대 접근 보정 | `/aruco/stand_pose` |
 
 | 쓰레기통 (60 mm) | 벽 (80 mm) |
 |---|---|
@@ -104,21 +110,35 @@ ArUco 작업에 추가로 필요한 것만 정리한다.
 ```bash
 sudo apt install -y ros-humble-camera-ros ros-humble-image-transport-plugins
 ros2 run camera_ros camera_node --ros-args -p width:=640 -p height:=480 \
-  -p camera_info_url:=file:///home/ubuntu/pi_camera.yaml
+  -p camera_info_url:=file:///home/turtlebot/pi_camera.yaml
 ```
-- `image-transport-plugins` 가 있어야 `/camera/image_raw/compressed` 가 발행된다.
+- 라파 사용자 이름은 `turtlebot` (홈: `/home/turtlebot`).
+- 인식은 라파에서 raw 영상으로 하므로 압축 영상은 필수가 아니다. Orin에서 화면을 볼 때만 `image-transport-plugins` 로 `/camera/image_raw/compressed` 를 쓴다.
 - 카메라 미인식 시 `/boot/firmware/config.txt` 에 `dtoverlay=imx219` 추가 후 재부팅.
 - 최신 터틀봇3는 Pi 카메라를 도커로 지원하는 변경이 있으니 e-Manual도 확인 (팀 가이드 5.7).
 
-### 5.2 Orin: 패키지
+### 5.2 패키지 · 통신
 ```bash
-sudo apt install -y ros-humble-cv-bridge ros-humble-tf2-geometry-msgs python3-scipy
+# 라파 (aruco_node) — 2026-11-22 설치 완료
+sudo apt install -y ros-humble-camera-ros ros-humble-cv-bridge ros-humble-image-transport-plugins python3-opencv python3-scipy
+sudo apt install -y ros-humble-rmw-cyclonedds-cpp
+# 라파 유선 고정 IP: /etc/netplan/60-ros-direct.yaml (eth0: 192.168.10.1/24, 게이트웨이 없음 → 인터넷은 Wi-Fi)
+# 라파 ~/.bashrc: ROS_DOMAIN_ID=30, RMW_IMPLEMENTATION=rmw_cyclonedds_cpp, CYCLONEDDS_URI=~/.ros/cyclonedds.xml (eth0 고정)
+# Orin (bin_aligner)
+sudo apt install -y ros-humble-tf2-geometry-msgs
 ```
+
+### 5.2.1 라파 카메라 시작 스크립트 · 보정 파일 (2026-11-23)
+- [`../pi_tools/start_camera.sh`](../pi_tools/start_camera.sh) → 라파 `~/turtlebot/pi_tools/` : `-p sensor_mode:=1640:1232`(센서 **전체 화각**) + 640×480 RGB888 출력, `~/pi_camera.yaml` 자동 적용
+  - `sensor_mode` 를 안 주면 640×480 모드가 **센서 가운데만 잘라 써서 화각이 약 23°** 로 좁아진다 (전체 화각은 약 62°)
+- `frame_id:=camera_rgb_optical_frame` (로봇 URDF 의 Pi 카메라 광학 프레임) — 기본값 `camera` 는 TF 트리에 없어 `bin_aligner` 가 TF 변환에 실패함
+- [`../pi_tools/pi_camera.yaml`](../pi_tools/pi_camera.yaml) → 라파 `~/pi_camera.yaml` : fx = fy = 525, 주점 (320, 240), k1 0.213, k2 −0.389
+  - 체커보드 내부 7×10, 25 mm. 손으로 든 사진만으로는 초점거리가 정해지지 않아(정면 위주 → 거리와 화각 구분 불가) **50 cm 정면 사진으로 fx 실측**(517~533) 후 고정, 왜곡만 49장으로 계산 (재투영 오차 1.7 px — 판에 고정한 보드로 다시 하면 개선 가능)
 
 ### 5.3 Pi 카메라 캘리브레이션 (필수)
 캘리브레이션 값(`camera_info`)이 없으면 `aruco_node`는 아무것도 발행하지 않는다.
 ```bash
-# Orin(모니터 연결)에서. 체커보드 8x6 내부코너, 한 칸 25 mm 예시
+# Orin(모니터 연결)에서 라파 카메라 영상을 받아 진행. 체커보드 8x6 내부코너, 한 칸 25 mm 예시
 sudo apt install ros-humble-camera-calibration
 ros2 run camera_calibration cameracalibrator --size 8x6 --square 0.025 \
   --ros-args -r image:=/camera/image_raw -p camera:=/camera
@@ -128,7 +148,7 @@ yaml을 라파로 복사(`~/pi_camera.yaml`)해서 `camera_info_url` 로 지정.
 
 ### 5.4 Pi 카메라 TF
 몸체 고정이므로 `base_link → 카메라 광학 프레임` 은 고정값이다.
-- 터틀봇3 와플파이 URDF(라파의 robot_state_publisher)에 이미 `camera_rgb_optical_frame` 이 있다.
+- 로봇 URDF(Orin의 `turtlebot3_manipulation` robot_state_publisher)에 Pi 카메라용 `camera_link` 계열 프레임이 이미 있다.
   카메라를 원래 자리에 그대로 두었다면 camera_ros의 `header.frame_id` 를 이 이름과 맞추면 된다.
 - 위치를 옮겼다면 실측해서 static TF를 추가:
   ```bash
@@ -144,21 +164,40 @@ yaml을 라파로 복사(`~/pi_camera.yaml`)해서 `camera_info_url` 로 지정.
 ## 6. 실행
 
 ```bash
-# 라파: 베이스 + 카메라
-ros2 launch turtlebot3_bringup robot.launch.py
-ros2 run camera_ros camera_node --ros-args -p width:=640 -p height:=480 \
-  -p camera_info_url:=file:///home/ubuntu/pi_camera.yaml
+# 라파: Pi 카메라 + 마커 인식 (라파는 이것만 실행) — 스크립트는 ../pi_tools 를 라파 ~/turtlebot/pi_tools 에 둠
+~/turtlebot/pi_tools/start_camera.sh   # 전체 화각 1640x1232 → 640x480, ~/pi_camera.yaml 적용
+~/turtlebot/pi_tools/start_aruco.sh    # aruco_node.py (라파용 기본값 USE_COMPRESSED = False), 로그 /tmp/pi_aruco.log
 
-# Orin: 마커 인식
-python3 aruco_node.py
+# Orin: 확인
 ros2 topic hz /aruco/bin_pose          # 10 Hz 이상
 ros2 topic echo /aruco/wall_1_pose     # 30 cm 앞에 두면 position.z ≈ 0.30
 
-# Orin: 쓰레기통 정렬 (Nav2 도착 후)
+# Orin: 바퀴·팔 bringup 이 떠 있는 상태에서 (pick&place 의 system.launch.py 또는 turtlebot3_manipulation base.launch.py)
+# 쓰레기통 정렬 (Nav2 도착 후)
 python3 bin_aligner.py --ros-args -p advance:=0.12   # 직진 거리는 팔 마운트에 맞게
 ros2 service call /bin_aligner/align std_srvs/srv/Trigger
+
+# 캔 거치대 정렬 (Nav2 로 거치대 지점 도착 후) — 캔이 link1 앞 약 0.30 m 에 오도록 자동 직진
+python3 stand_aligner.py --ros-args -p can_offset:=0.05   # 마커 면 ~ 캔 중심 거리 (거치대에서 실측)
+ros2 service call /stand_aligner/align std_srvs/srv/Trigger
 ```
-라파에서 직접 인식하려면 `aruco_node.py` 의 `USE_COMPRESSED = False`.
+
+마커로 위치 보정 (맵핑 → 주행) — 실행 방법은 [slam_nav2 README 1-1](https://github.com/hanjaejin124/turtlebot/blob/main/slam_nav2/README.md) 참고
+```bash
+~/slam_nav2/slam_aruco.sh        # 출발점에서 실행 → w: 자율 탐색, 지도가 다 그려지면 자동 저장 (마커 = 맵의 끝)
+~/slam_nav2/nav2_aruco.sh        # Nav2 + aruco_localizer
+ros2 service call /aruco_localizer/correct std_srvs/srv/Trigger   # 지금 바로 보정
+```
+`aruco_localizer`: 평면 마커(ID 1·2·3)는 x, y, yaw 모두 계산하고, yaw 는 AMCL 과 반반 섞는다(`yaw_weight` 0.5).
+원통 쓰레기통(ID 0)은 중심축 위치만 써서 x, y 만 보정. 멈춰 있을 때 1초간 8프레임 이상, 흔들림 2 cm·3° 이하일 때만,
+차이 3 cm/2° 이상 1 m/30° 이하일 때 보정. 가짜 TF·마커(잡음 2 mm, 1°)로 확인: 마커 지도 좌표 오차 0.3 cm 이내,
+보정 결과가 손 계산과 1 cm 이내.
+
+`stand_aligner` 파라미터 (기본값): `standoff` 0.25 m (마커 정면 정렬 거리), `can_offset` 0.05 m,
+`target_reach` 0.30 m (pick&place 실측 성공 범위 0.29~0.33 m), `link1_x` -0.092 m, `advance` -1 (= 자동 계산
+`standoff - (link1_x + target_reach - can_offset)`), `total_timeout` 70 s, `max_retries` 5.
+시뮬레이션(실제 제어 코드 + 차동구동 모델): Nav2 도착 오차 ±5 cm → 39/40, ±10 cm → 36/40 이 집기 범위 안. 실기 테스트 전.
+Orin에서 압축 영상을 받아 인식하는 방식(`USE_COMPRESSED = True`)도 코드에 남아 있지만, 현재 구성은 라파에서 인식한다.
 
 ---
 
@@ -170,11 +209,11 @@ MARKERS = {
     0: dict(name="bin",    size=0.060, cyl_radius=0.095),  # 원형 쓰레기통 (지름 19 cm)
     1: dict(name="wall_1", size=0.080),
     2: dict(name="wall_2", size=0.080),
-    3: dict(name="wall_3", size=0.080),
+    3: dict(name="stand",  size=0.080),                     # ID 3 = 콜라캔 거치대
 }
 OFFSET = {}            # 실측 보정값 (m, 카메라 광학 프레임) 예: {0: (0.0, 0.0, 0.004)}
 AVG_N = 5              # 이동 평균 프레임 수
-USE_COMPRESSED = True  # Orin: 압축 영상 구독 / 라파에서 실행: False
+USE_COMPRESSED = False # 라파에서 실행: False (현재 구성, 기본값) / Orin에서 압축 영상 구독: True
 ```
 
 | 함수 | 역할 |
@@ -271,19 +310,20 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
 
 | 단계 | 내용 | 관련 |
 |---|---|---|
-| 0 | 두 보드 연동 (팀 가이드 4~8장): 유선 · Cyclone DDS · chrony · Orin에서 teleop | 팀 가이드 |
-| 1 | Pi 카메라 발행(압축) → Orin 수신 확인 → 캘리브레이션 | 5.1, 5.3 |
+| 0 | 두 보드 연동: 라파 유선 고정 IP 192.168.10.1 · Cyclone DDS · chrony · Orin에서 `/aruco/*` 수신 | 팀 가이드 |
+| 1 | 라파에서 Pi 카메라 발행 → 캘리브레이션 → 라파에서 `aruco_node` 실행 | 5.1, 5.3 |
 | 2 | Pi 카메라 TF 확인 → `aruco_node` 실측 보정 | 5.4, 7 |
 | 3 | 쓰레기통 정렬 실기 테스트: 일부러 5 cm · 10° 어긋나게 세우고 `auto_start` | 8 |
 | 4 | 팔 · D435i TF 통합 (팀 가이드 9장) | 아래 |
 | 5 | 놓기 동작 (`arm_server.py` 의 `/drop/place`) 실기 확인 | [`../turtlebot3_mission`](../turtlebot3_mission/README.md) |
 | 6 | `mission_node.py` 단계별 리허설 → 전체 | [`../turtlebot3_mission`](../turtlebot3_mission/README.md) |
-| 7 | (필요 시) `wall_localizer`: 벽 마커로 AMCL 위치 보정 | TODO |
+| 7 | `wall_localizer`: 주요 포인트 마커(ID 1·2)로 AMCL 위치 보정, 거치대 마커(ID 3)로 접근 보정 | TODO |
 
 ### 4단계 메모: D435i가 팔에 달려 있을 때
 - TF: `base_link → (팔 마운트, static) → link1 → … → link5 (joint_states) → d435i_link (static, 실측)`
   → 팔이 움직이면 카메라 위치도 따라 바뀐다. 팔 robot_state_publisher가 정상이어야 YOLO 좌표가 맞다
-- 팀 가이드 9장대로 바퀴(라파)와 팔(Orin)의 `/joint_states` 를 분리하지 않으면 TF가 깨진다
+- 바퀴와 팔이 모두 OpenCR → Orin(`turtlebot3_manipulation`)으로 구동되므로 `/joint_states` 는 하나로 나온다 (분리 불필요)
+- 손목 카메라 위치·그리퍼 방향 등 실측값은 [`pick&place`](https://github.com/hanjaejin124/turtlebot/blob/main/pick%26place/README.md) 참고
 - **관측 자세**: 팔을 정해진 자세로 들어 쓰레기를 내려다보고 YOLO + 뎁스로 위치를 구한 뒤, 그 값으로 집기
   (D435i는 약 0.2~0.3 m보다 가까우면 뎁스가 안 나오므로 접근 중에는 다시 보지 않는다)
 - 카메라 장착 위치는 자로 실측하거나, 마커를 이용한 hand-eye 캘리브레이션으로 구한다
@@ -295,7 +335,7 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
 - 통 위치는 `odom` 기준으로 기억 → 정렬 후 직진(advance)으로 마커가 안 보여도 놓을 수 있음
 
 ### TODO 노드
-- **wall_localizer**: 벽 마커 지도 좌표 `WALL_MAP = {1: (x, y, yaw), ...}` 기록 →
+- **wall_localizer**: 주요 포인트 마커(ID 1·2) 지도 좌표 `WALL_MAP = {1: (x, y, yaw), ...}` 기록 →
   `T_map_base = T_map_marker × inv(T_base_marker)` → `/initialpose` 발행 (정지 상태, 1.5 m 이내, 쿨다운)
 
 ---
@@ -305,8 +345,8 @@ APPROACH ── 목표 거리 도달 ──┬── 좌우 OK ──▶ ROTATE 
 | 증상 | 원인 · 해결 |
 |---|---|
 | `/aruco/*` 가 발행되지 않음 | `camera_info` 미수신 → `camera_info_url` 확인 |
-| Orin에서 `/camera/image_raw/compressed` 가 없음 | 라파에 `ros-humble-image-transport-plugins` 설치 |
-| Orin에서 토픽이 안 보임 | 팀 가이드 10장 (DOMAIN_ID, RMW, cyclonedds.xml 인터페이스) |
+| Orin에서 화면용 `/camera/image_raw/compressed` 가 없음 | 라파에 `ros-humble-image-transport-plugins` 설치 |
+| Orin에서 `/aruco/*` 가 안 보임 | 라파 유선 IP(192.168.10.1) 설정, DOMAIN_ID, RMW, cyclonedds.xml 인터페이스 (팀 가이드 10장) |
 | 거리가 일정 비율로 틀림 | `size` 실측값 오류 또는 인쇄 배율 |
 | 인식이 안 됨 | 반사, 흰 여백 부족, 마커가 너무 작음(30 px 미만), 카메라와 높이 차이 |
 | `bin_aligner` 에서 TF 변환 실패 | base_link → 카메라 프레임 TF 없음 (5.4) |

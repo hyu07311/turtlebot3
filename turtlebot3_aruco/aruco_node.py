@@ -1,8 +1,8 @@
 """ArUco 4개 마커 인식 노드 (OpenCV 4.5 / 4.7+ 모두 지원)
 
-권장: Orin에서 실행하고, RPi의 Pi 카메라 압축 영상(/camera/image_raw/compressed)을 받는다.
-      (RPi는 베이스 주행 · 라이다를 담당하므로 영상 처리 부하를 Orin으로 옮김)
-RPi에서 직접 돌릴 때는 USE_COMPRESSED = False 로 raw 영상을 받으면 된다.
+라즈베리파이에서 실행한다. (라파의 역할은 Pi 카메라 + ArUco 인식뿐. OpenCR · 라이다 · 주행은 Orin)
+camera_ros 의 raw 영상(/camera/image_raw)을 직접 받아 인식하고, 결과 /aruco/* 만 유선으로 Orin에 보낸다.
+Orin에서 압축 영상으로 인식하던 예전 방식은 USE_COMPRESSED = True 로 남겨 둠.
 
   python3 aruco_node.py
   -> /aruco/<name>_pose   마커 중심 '표면' 위치·방향 (PoseStamped, 카메라 광학 프레임)
@@ -27,13 +27,13 @@ from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 # ---- 여기만 수정 -------------------------------------------------------
 MARKERS = {
     0: dict(name="bin", size=0.060, cyl_radius=0.095),    # 원형 쓰레기통 (지름 19 cm)
-    1: dict(name="wall_1", size=0.080),                    # 평평한 벽
-    2: dict(name="wall_2", size=0.080),
-    3: dict(name="wall_3", size=0.080),
+    1: dict(name="wall_1", size=0.080),                    # 주요 포인트 1 (평면) - 위치 보정
+    2: dict(name="wall_2", size=0.080),                    # 주요 포인트 2 (평면) - 위치 보정
+    3: dict(name="stand", size=0.080),                     # 콜라캔 거치대 (평면) - 접근 보정
 }
 OFFSET = {}          # 실측 보정값 (m, 카메라 광학 프레임) 예: {0: (0.0, 0.0, 0.004)}
 AVG_N = 5            # 이동 평균 프레임 수
-USE_COMPRESSED = True                 # Orin: True (압축 영상) / RPi에서 실행: False
+USE_COMPRESSED = False                # 라파에서 실행: False (현재 구성) / Orin에서 압축 영상: True
 IMAGE_TOPIC = "/camera/image_raw"     # 압축 사용 시 자동으로 '/compressed' 를 붙여 구독
 INFO_TOPIC = "/camera/camera_info"
 # ----------------------------------------------------------------------

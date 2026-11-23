@@ -52,9 +52,13 @@ def quat_z_axis(q):
 
 
 class BinAligner(Node):
-    def __init__(self):
-        super().__init__("bin_aligner")
-        p = lambda n, v: self.declare_parameter(n, v).value  # noqa: E731
+    """마커 정면 정렬 (+직진). 쓰레기통(ID 0)용 기본값. 캔 거치대(ID 3)는 stand_aligner.py 가 기본값만 바꿔 재사용."""
+
+    def __init__(self, name="bin_aligner", defaults=None):
+        super().__init__(name)
+        defaults = defaults or {}
+        p = lambda n, v: self.declare_parameter(n, defaults.get(n, v)).value  # noqa: E731
+        self.service_name = p("service", "/bin_aligner/align")
         self.pose_topic = p("pose_topic", "/aruco/bin_pose")
         self.base_frame = p("base_frame", "base_link")
         self.standoff = p("standoff", 0.25)        # base_link 원점 ~ 통 표면 목표 거리 (m)
@@ -89,7 +93,7 @@ class BinAligner(Node):
         self.create_subscription(Odometry, "/odom", self.odom_cb, 10, callback_group=cb)
         self.odom = None            # (x, y, yaw)
         self.create_timer(0.05, self.control_step, callback_group=cb)  # 20 Hz
-        self.create_service(Trigger, "/bin_aligner/align", self.align_srv,
+        self.create_service(Trigger, self.service_name, self.align_srv,
                             callback_group=MutuallyExclusiveCallbackGroup())
 
         self.lock = threading.Lock()
@@ -151,7 +155,11 @@ class BinAligner(Node):
         self.cmd_pub.publish(Twist())
         self.result = (ok, msg)
         self.done.set()
-        (self.get_logger().info if ok else self.get_logger().error)(msg)
+        # rclpy 는 같은 줄에서 로그 등급이 바뀌면 ValueError -> 성공/실패 로그를 다른 줄로 분리
+        if ok:
+            self.get_logger().info(msg)
+        else:
+            self.get_logger().error(msg)
 
     def set_phase(self, phase):
         if phase != self.phase:

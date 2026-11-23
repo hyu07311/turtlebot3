@@ -67,16 +67,17 @@ class ArmServer(Node):
         self.stow_pose = p("stow_pose", [0.0, -1.0, 0.3, 0.7])
         self.group = p("group", "arm")
         self.vel_scale = p("velocity_scale", 0.3)
-        self.gripper_open = p("gripper_open", 0.019)      # ⚠ 그리퍼 관절 열림 위치 (m)
+        # 실물 확인(2026-11-22): 이 로봇은 -0.010 = 열림, + 방향 = 닫힘 (URDF 설명과 반대), 빈손으로 끝까지 닫히면 약 0.0154
+        self.gripper_open = p("gripper_open", -0.010)     # 그리퍼 관절 열림 위치 (m)
         self.gripper_joint = p("gripper_joint", "gripper_left_joint")
-        self.empty_close = p("gripper_empty_below", 0.0)  # 닫은 뒤 이보다 작으면 '빈손' 판정 (⚠ 실측)
+        self.empty_above = p("gripper_empty_above", 0.014)  # 닫은 뒤 이보다 크면(끝까지 닫힘) '빈손' 판정 (실측 0.0154)
         self.joint_states_topic = p("joint_states_topic", "/joint_states")
         # grasp_node 연동
         self.target_topic = p("target_topic", "/cola/target_point")
         self.grasp_target_topic = p("grasp_target_topic", "/grasp/target")
         self.grasp_result_topic = p("grasp_result_topic", "/grasp/result")
         self.grasp_frame = p("grasp_frame", "link1")
-        self.pick_timeout = p("pick_timeout", 40.0)
+        self.pick_timeout = p("pick_timeout", 55.0)   # grasp_node 집기(열기→접근→도착 확인→쥐기→들기) 약 25~35 s
         # 놓기
         self.bin_topic = p("bin_topic", "/aruco/bin_center")
         self.floor_frame = p("floor_frame", "base_footprint")
@@ -240,7 +241,11 @@ class ArmServer(Node):
             res.success, res.message = False, f"예외: {e}"
         finally:
             self.busy.release()
-        (self.get_logger().info if res.success else self.get_logger().error)(res.message)
+        # rclpy 는 같은 줄에서 로그 등급이 바뀌면 ValueError -> 다른 줄로 분리
+        if res.success:
+            self.get_logger().info(res.message)
+        else:
+            self.get_logger().error(res.message)
         return res
 
     def srv_look(self, _req, res):
@@ -293,7 +298,7 @@ class ArmServer(Node):
             return False, "팔 동작 완료를 확인하지 못함"
         with self.lock:
             g = self.joints.get(self.gripper_joint)
-        if g is not None and g < self.empty_close:
+        if g is not None and g > self.empty_above:
             return False, f"그리퍼가 끝까지 닫힘 ({g:.4f}) → 빈손으로 판단"
         return True, "집기 완료"
 

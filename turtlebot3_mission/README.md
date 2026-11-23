@@ -1,7 +1,7 @@
 # 시연 시나리오 상위 노드 (mission) · 팔 서비스
 
 출발 → 쓰레기 줍기 → 쓰레기통에 버리기 전체를 순서대로 실행하는 노드와, 그에 필요한 팔 서비스 서버.
-모두 **Orin**에서 실행한다. (라파는 베이스 bringup · Pi 카메라)
+모두 **Orin**에서 실행한다. (라파는 Pi 카메라 + ArUco 인식만. 바퀴·팔은 OpenCR → Orin)
 
 ## 1. 구성
 
@@ -25,7 +25,8 @@ mission_node.py ─┬─ Nav2 navigate_to_pose ──────────�
 | 단계 | 내용 | 실패 시 |
 |---|---|---|
 | `init` | START 위치로 AMCL 초기화, Nav2 준비 확인 | 중단 |
-| `go_trash` | Nav2 → TRASH | 1회 재시도, AMCL로 도착 재확인 (0.4 m) |
+| `go_trash` | Nav2 → TRASH (`waypoints.yaml` 에 `via: [P1]` 을 넣으면 P1 에 들러 마커로 위치 보정 후 이동) | 1회 재시도, AMCL로 도착 재확인 (0.4 m) |
+| `approach` | `/stand_aligner/align` (거치대 마커 ID 3 정렬 + 직진 → 캔이 팔 앞 약 0.30 m) | TRASH 재이동 후 재시도 |
 | `look` | 팔 관측 자세 (D435i가 앞쪽 바닥을 봄) | 중단 |
 | `detect` | `/cola/target_point` 가 약 1초 연속으로 들어올 때까지 대기 | 제자리 +20° → −20° 돌아보며 재시도 |
 | `pick` | `/grasp/pick` | 관측 자세 → 재인식 → 1회 재시도 |
@@ -39,14 +40,15 @@ mission_node.py ─┬─ Nav2 navigate_to_pose ──────────�
 
 ## 3. 준비
 
-### 3.1 웨이포인트 (11주차 `waypoint_nav.py` 와 같은 파일)
+### 3.1 웨이포인트 ([`slam_nav2`](https://github.com/hanjaejin124/turtlebot/blob/main/slam_nav2/README.md) 의 `waypoint_nav.py`)
+시연 장소는 미리 SLAM으로 맵핑해 `~/slam_nav2/maps/map.yaml` 로 저장해 둔다.
 ```bash
-python3 ~/waypoint_nav.py record     # RViz Publish Point로 3곳 클릭
-nano ~/waypoints.yaml                # 이름을 START / TRASH / BIN 으로, yaw(도) 수정
+python3 ~/slam_nav2/scripts/waypoint_nav.py record     # RViz Publish Point로 3곳 클릭
+nano ~/slam_nav2/waypoints.yaml                        # 이름을 START / TRASH / BIN 으로, yaw(도) 수정
 ```
 ```yaml
 - {name: START, x: 0.0, y: 0.0, yaw: 0.0}
-- {name: TRASH, x: 3.2, y: 0.4, yaw: 0.0}     # 캔이 D435i 관측 범위에 들어오는 위치·방향
+- {name: TRASH, x: 3.2, y: 0.4, yaw: 0.0}     # 캔 거치대(ArUco ID 3) 앞, 캔이 D435i 관측 범위에 들어오는 위치·방향
 - {name: BIN,   x: 5.1, y: -0.6, yaw: 90.0}   # 쓰레기통 정면 약 0.3 m 앞, 통을 바라보는 방향
 ```
 
@@ -102,16 +104,19 @@ turtlebot3_manipulation 표준 마운트(`link1` = `base_link` + (−0.092, 0, 0
 ## 5. 실행
 
 ```bash
-# 라파
-ros2 launch turtlebot3_bringup robot.launch.py
-ros2 run camera_ros camera_node --ros-args -p width:=640 -p height:=480 -p camera_info_url:=file:///home/ubuntu/pi_camera.yaml
+# 라파 — Pi 카메라 + ArUco 인식만
+ros2 run camera_ros camera_node --ros-args -p width:=640 -p height:=480 -p camera_info_url:=file:///home/turtlebot/pi_camera.yaml
+python3 turtlebot3_aruco/aruco_node.py                            # 라파용 기본값
 
 # Orin — 각각 터미널
-ros2 launch <팔 하드웨어 + MoveIt launch>                         # 팀 가이드 6.7 / 9장
-ros2 launch nav2_bringup bringup_launch.py map:=$HOME/maps/map.yaml   # 또는 for_orin/nav2.sh
-python3 turtlebot3_aruco/aruco_node.py
+ros2 launch turtlebot3_manipulation_bringup base.launch.py        # OpenCR: 바퀴·팔 (pick&place 참고)
+~/slam_nav2/lidar.sh                                              # LDS-03 (Orin USB)
+ros2 launch turtlebot3_manipulation_moveit_config move_group.launch.py use_sim:=false
+~/slam_nav2/nav2.sh                                               # 미리 만든 지도 ~/slam_nav2/maps/map.yaml
 python3 turtlebot3_aruco/bin_aligner.py --ros-args -p advance:=0.12
-<cola_detector 실행>
+python3 turtlebot3_aruco/stand_aligner.py                        # 캔 거치대(ID 3) 정렬
+ros2 run omx_cola_grasp cola_detector --ros-args -p model_path:=/home/orin/yolo/yolo26n.engine -p "target_class:=cup,bottle" -p conf_threshold:=0.25
+# (위 bringup · MoveIt · cola_detector · grasp_node 를 한 번에: ros2 launch omx_cola_grasp system.launch.py mission:=true rviz:=false)
 ros2 run omx_cola_grasp grasp_node --ros-args -r /cola/target_point:=/grasp/target -p execute:=true
 python3 turtlebot3_mission/arm_server.py
 
@@ -127,6 +132,7 @@ python3 turtlebot3_mission/mission_node.py go_bin align drop stow # 일부만 (�
 |---|---|---|
 | 1 | `arm_server` 만 띄우고 `ros2 service call /arm/look std_srvs/srv/Trigger` | 관측 · 접기 자세, D435i 시야 |
 | 2 | `mission_node.py look detect pick stow` (캔을 팔 앞에 직접 둠) | 집기 · 빈손 판정 |
+| 2-1 | `mission_node.py go_trash approach look detect pick stow` | 거치대 정렬 후 캔이 집기 범위(0.29~0.33 m) 안 |
 | 3 | `mission_node.py go_bin align` | Nav2 도착 → 정렬 → 직진 |
 | 4 | 캔을 손으로 쥐여 주고 `mission_node.py drop stow` | 놓는 높이 · 통 충돌 |
 | 5 | `mission_node.py` | 전체 |
@@ -139,6 +145,7 @@ ROS 실기 실행 전, 로직만 검증한 결과.
 |---|---|---|
 | `omx_ik.py` | FK(0) = URDF 치수 합 / 12주차 시뮬레이션 목표 4개 / 무작위 FK→IK 왕복 | (0.286, 0, 0.2045) 일치 / 3개 도달 · 0.45 m 거부 (12주차와 동일) / 12,988개 오차 1e-16 m |
 | `bin_aligner.py` (advance 0.12 포함) | 실제 `control_step()` 을 차동 구동 모델에 연결, 초기 오차 45조건, 측정 잡음 4 mm, 오도메트리 1% 오차, 0.17 m 이내 마커 안 보임 | 45/45 성공, 최대 23 s, 최종 오차 앞뒤 12 mm · 좌우 15 mm · 2.7° |
+| `stand_aligner.py` | 같은 차동 구동 시뮬레이션, Nav2 도착 오차 무작위 40회 | ±5 cm → 39/40, ±10 cm → 36/40 이 집기 범위 안 |
 | `mission_node.py` | ROS를 모의 객체로 바꿔 단계 순서 확인 | 정상 11단계 / 집기 실패 → 재인식 후 재시도 / 정렬 2회 실패 → 정지 · 팔 접기 / 일부 단계 실행 / 잘못된 단계 거부 |
 
 `arm_server.py` 는 MoveIt · 그리퍼 · TF 와 직접 붙는 코드라 실기에서 처음 확인해야 한다 (문법 검사만 통과).

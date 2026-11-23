@@ -8,9 +8,11 @@
   python3 mission_node.py go_bin align drop stow           # 원하는 단계만 (리허설용)
   python3 mission_node.py --list                           # 단계 목록
 
-웨이포인트: 11주차 waypoint_nav.py 와 같은 ~/waypoints.yaml 을 쓴다.
-  python3 ~/waypoint_nav.py record 로 3곳을 찍은 뒤, 파일에서 이름을 START / TRASH / BIN 으로 바꾸고
-  yaw(도)를 도착 방향으로 고친다. BIN 의 yaw 는 '쓰레기통을 정면으로 바라보는 방향'.
+웨이포인트: ~/slam_nav2/waypoints.yaml (START / P1 / P2 / TRASH / BIN)
+  맵핑 때 marker_mapper.py 가 마커 위치로 자동 생성한다 (발견 순서) (각 마커 정면, 마커를 바라보는 방향).
+  via: [P1, ...] 를 직접 넣은 지점은 그 경유지를 먼저 들러 aruco_localizer 로 위치를 보정한 뒤 이동한다.
+  marker 가 있는 지점에 도착하면 /aruco_localizer/correct 로 위치를 보정한다 (없거나 실패해도 계속 진행).
+  (직접 찍을 때는 waypoint_nav.py record 후 이름을 START / TRASH / BIN 으로 바꾸고 yaw(도)를 고친다)
 
 필요한 노드 (모두 Orin, 라파에서는 bringup · 카메라)
   Nav2 · AMCL, aruco_node.py, bin_aligner.py, arm_server.py, grasp_node(+ 입력 remap), cola_detector
@@ -33,12 +35,16 @@ from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.signals import SignalHandlerOptions
 from std_srvs.srv import Trigger
 
-WAYPOINTS = os.path.expanduser("~/waypoints.yaml")
-STEPS = ["init", "go_trash", "look", "detect", "pick", "stow",
+# slam_nav2 의 waypoint_nav.py 가 저장하는 곳. 예전 위치(~/waypoints.yaml)는 없을 때만 사용
+WAYPOINTS = os.path.expanduser("~/slam_nav2/waypoints.yaml")
+if not os.path.exists(WAYPOINTS) and os.path.exists(os.path.expanduser("~/waypoints.yaml")):
+    WAYPOINTS = os.path.expanduser("~/waypoints.yaml")
+STEPS = ["init", "go_trash", "approach", "look", "detect", "pick", "stow",
          "go_bin", "align", "drop", "stow", "go_start"]
 STEP_INFO = {
     "init": "출발점 초기 위치 설정 · Nav2 준비 확인",
-    "go_trash": "Nav2: 쓰레기 지점(TRASH)으로 이동",
+    "go_trash": "Nav2: 쓰레기 지점(TRASH, 캔 거치대 앞)으로 이동",
+    "approach": "캔 거치대 마커(ID 3) 정렬 + 직진 (/stand_aligner/align) → 캔이 팔 앞 약 0.30 m, 실패 시 TRASH 재이동 후 재시도",
     "look": "팔 관측 자세 (/arm/look)",
     "detect": "YOLO 캔 인식 대기 (안 보이면 제자리 좌우 회전 후 재시도)",
     "pick": "집기 (/grasp/pick), 실패 시 재인식 후 재시도",
@@ -56,7 +62,8 @@ DETECT_TURNS = [0.35, -0.70, 0.35]   # 못 찾으면 이만큼(rad) 차례로 �
 PICK_RETRIES = 1
 ALIGN_RETRIES = 1
 SERVICE_TIMEOUT = {"/arm/look": 40, "/arm/stow": 40, "/grasp/pick": 60,
-                   "/bin_aligner/align": 50, "/drop/place": 90}
+                   "/stand_aligner/align": 80, "/bin_aligner/align": 50, "/drop/place": 90,
+                   "/aruco_localizer/correct": 8}
 
 
 def spin_until(node, future, timeout=None):
@@ -90,7 +97,7 @@ class Mission(Node):
         qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(PoseWithCovarianceStamped, "amcl_pose", self.on_pose, qos)
         self.create_subscription(PointStamped, "/cola/target_point", self.on_target, 10)
-        self.clients = {}
+        self.srv_clients = {}
         self.position = None
         self.last_target = 0.0
         self.goal_handle = None
@@ -112,9 +119,9 @@ class Mission(Node):
 
     def call(self, name):
         """Trigger 서비스 호출 → (성공 여부, 메시지)."""
-        if name not in self.clients:
-            self.clients[name] = self.create_client(Trigger, name)
-        cli = self.clients[name]
+        if name not in self.srv_clients:
+            self.srv_clients[name] = self.create_client(Trigger, name)
+        cli = self.srv_clients[name]
         if not cli.wait_for_service(timeout_sec=3.0):
             return False, f"{name} 서비스가 없음 (노드 실행 여부 확인)"
         fut = cli.call_async(Trigger.Request())
@@ -139,6 +146,30 @@ class Mission(Node):
             spin_for(self, 0.3)
 
     def go(self, name):
+        """경유지(via)를 들러 마커로 위치 보정 → 목적지 이동 → 목적지 마커로 보정."""
+        for v in self.points[name].get("via") or []:
+            if v not in self.points:
+                self.log(f"  경유지 {v} 가 waypoints.yaml 에 없어 건너뜀")
+                continue
+            self.log(f"  경유지 {v} (위치 보정)")
+            ok, msg = self.nav_to(v)
+            if ok:
+                self.localize(v)
+            else:
+                self.log(f"  경유지 실패, 목적지로 바로 이동: {msg}")
+        ok, msg = self.nav_to(name)
+        if ok:
+            self.localize(name)
+        return ok, msg
+
+    def localize(self, name):
+        if self.points[name].get("marker") is None:
+            return
+        spin_for(self, 0.5)                    # 완전히 멈춘 뒤 마커 측정
+        ok, msg = self.call("/aruco_localizer/correct")
+        self.log(f"  마커 위치 보정 {'완료' if ok else '안 함'}: {msg}")
+
+    def nav_to(self, name):
         p = self.points[name]
         for attempt in range(NAV_RETRIES + 1):
             if attempt:
@@ -229,23 +260,28 @@ class Mission(Node):
             self.log(f"  집기 실패: {msg}")
         return False, "집기 재시도 모두 실패"
 
-    def step_align(self):
+    def align_at(self, point, service):
+        """마커 정렬 서비스 호출, 실패하면 Nav2 로 point 에 다시 간 뒤 재시도."""
         for attempt in range(ALIGN_RETRIES + 1):
             if attempt:
-                self.log("  BIN 지점으로 다시 이동 후 재정렬합니다.")
-                ok, msg = self.go("BIN")
+                self.log(f"  {point} 지점으로 다시 이동 후 재정렬합니다.")
+                ok, msg = self.nav_to(point)     # 경유지는 다시 들르지 않음
                 if not ok:
                     return False, msg
-            ok, msg = self.call("/bin_aligner/align")
+            ok, msg = self.call(service)
             if ok:
                 return True, msg
             self.log(f"  정렬 실패: {msg}")
         return False, "정렬 재시도 모두 실패"
 
+    def step_align(self):
+        return self.align_at("BIN", "/bin_aligner/align")
+
     def run_step(self, step):
         return {
             "init": self.step_init,
             "go_trash": lambda: self.go("TRASH"),
+            "approach": lambda: self.align_at("TRASH", "/stand_aligner/align"),
             "look": lambda: self.call("/arm/look"),
             "detect": self.step_detect,
             "pick": self.step_pick,
